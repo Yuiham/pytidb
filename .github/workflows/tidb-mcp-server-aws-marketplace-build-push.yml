@@ -52,8 +52,12 @@ jobs:
           mask-aws-account-id: true
           unset-current-credentials: true
 
-      - name: Verify current AWS identity
-        run: aws sts get-caller-identity
+      - name: Verify AWS credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+          aws sts get-caller-identity --query 'Account' --output text >/dev/null
+          echo "AWS credentials are valid."
 
       - name: Set up QEMU for ARM64 builds
         uses: docker/setup-qemu-action@v3
