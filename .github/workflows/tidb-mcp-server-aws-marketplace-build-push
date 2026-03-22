@@ -1,0 +1,95 @@
+name: Build and Push TiDB MCP Server to AWS Marketplace
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Immutable image tag, for example 0.1.0"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: aws-marketplace-image-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment: aws-marketplace
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      MARKETPLACE_REGISTRY_ID: ${{ vars.MARKETPLACE_REGISTRY_ID }}
+      ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}
+      ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 1
+
+      - name: Validate image tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG='${{ inputs.image_tag }}'
+          if [[ -z "$TAG" || "$TAG" == "latest" ]]; then
+            echo "Use an explicit immutable tag. Do not use latest."
+            exit 1
+          fi
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ env.AWS_REGION }}
+          mask-aws-account-id: true
+          unset-current-credentials: true
+
+      - name: Verify current AWS identity
+        run: aws sts get-caller-identity
+
+      - name: Set up QEMU for ARM64 builds
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to AWS Marketplace ECR
+        uses: aws-actions/amazon-ecr-login@v2
+        with:
+          registries: ${{ env.MARKETPLACE_REGISTRY_ID }}
+
+      - name: Build and push ARM64 image
+        id: build-push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./deploy/aws-marketplace/Dockerfile
+          platforms: linux/arm64
+          push: true
+          provenance: false
+          tags: ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:${{ inputs.image_tag }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Verify uploaded image
+        run: |
+          aws ecr describe-images \
+            --registry-id "${MARKETPLACE_REGISTRY_ID}" \
+            --repository-name "${ECR_REPOSITORY}" \
+            --region "${AWS_REGION}" \
+            --image-ids imageTag='${{ inputs.image_tag }}'
+
+      - name: Print pushed image reference
+        run: |
+          echo "Pushed image:"
+          echo "${ECR_REGISTRY}/${ECR_REPOSITORY}:${{ inputs.image_tag }}"
